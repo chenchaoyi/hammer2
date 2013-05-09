@@ -1,0 +1,5 @@
+{"Weight": 5, "URL":"http://localhost:9988/123/players/_random_range_(1000000,2000000)", "Method":"PUT", "Body":"{\"player_id\":\"_random_range_(1,1000000)\",\"level\":\"50\",\"rank\":\"_random_range_(1,2000)\", \"name\":\"bob\",\"currency\":\"_random_range_(2001,4000)\",\"defense\":\"5000\", \"attack\":\"5000\"}", "Type":"REST"}
+{"Weight": 5, "URL":"http://localhost:9988/123/players/_random_range_(1,1000000)", "Method":"PATCH", "Body":"{\"player_id\":\"_random_range_(1,1000000)\",\"level\":\"50\",\"rank\":\"_random_range_(1,2000)\", \"name\":\"bob\",\"currency\":\"_random_range_(2001,4000)\",\"defense\":\"5000\", \"attack\":\"5000\"}", "Type":"REST"}
+{"Weight": 5, "URL":"http://localhost:9988/123/players/_random_range_(1,1000000)", "Method":"GET", "Body":"{}", "Type":"REST"}
+{"Weight": 55, "URL":"http://localhost:9988/123/list?player=_random_range_(1,1000000)", "Method":"GET", "Body":"{}", "Type":"REST"}
+{"Weight": 30, "URL":"http://localhost:9988/123/battle?attacker=_random_range_(1,1000000,x)&winner=_value_of_(x)&loser=_random_range_(1,1000000)", "Method":"POST", "Body":"{}", "Type":"REST"}

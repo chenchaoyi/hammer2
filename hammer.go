@@ -4,19 +4,19 @@ import (
 	"flag"
 	"fmt"
 	"greeauth"
-	"io"
+	"html/template"
 	"io/ioutil"
 	"log"
+	"logg"
 	"math/rand"
 	"net/http"
 	"net/url"
 	"oauth"
 	"runtime"
+	"scenario"
+	"strconv"
 	"strings"
-	// "sync"
-	"sync/atomic"
 	"time"
-	"trafficprofiles"
 )
 
 // to reduce size of thread, speed up
@@ -26,166 +26,93 @@ const SizePerThread = 10000000
 
 // Counter will be an atomic, to count the number of request handled
 // which will be used to print PPS, etc.
-type Counter struct {
-	lasttime      int64 // time of last print, in secon, to calculate RPS
-	lastcount     int64 // count of last print
-	lasttotaltime int64 // last total response time
+type Hammer struct {
+	counter *scenario.Counter
 
-	count     int64 // total # of request
-	totaltime int64 // total response time.
-
-	totalerrors int64 // how many error
-
-	totalslowresp int64 // how many slow response. 
-
-	// to calculate send count
-	s_lasttime  int64
-	s_lastcount int64
-	s_count     int64
-
-	// book keeping just for faster stats report so we do not do it again
-	avg_time      float64
-	last_avg_time float64
-	backlog       int64
-
-	client (*http.Client)
-
-	monitor (*time.Ticker)
-
+	client  *http.Client
+	monitor *time.Ticker
 	// ideally error should be organized by type TODO
 	throttle <-chan time.Time
-
-	runinfo <-chan bool // to indicate current run is good or bad
-
-	// auto find pps
-	currentRPS  time.Duration
-	lastGoodRPS time.Duration
-	lastBadRPS  time.Duration
+	// counterArray [][]int64
 }
-
-var TrafficProfile = new(trafficprofiles.Profile)
-var _DEBUG bool
-var _AUTH_METHOD string
-var _HOST string
-
-var C2S_SECRET_KEY = "a178b352cb1a8ab08f76619f27d2e739"
-//var S2S_SECRET_KEY = "87fe27dda60668dd75f5ed39514cf2f7"
-var S2S_SECRET_KEY = "923ee6aa9d1096e5a366b3a987e961a7"
-
-var oauth_client = new(oauth.Client)
-var gree_client = new(greeauth.Client)
 
 // init
-func (c *Counter) _init() {
-	// init http client
-	c.client = &http.Client{}
-
-	// make channel for auto finder mode
-	c.runinfo = make(chan bool)
-
-	c.monitor = time.NewTicker(time.Second)
-	go func() {
-		for {
-			<-c.monitor.C // rate limit for monitor routine
-			go c.pperf()
+func (c *Hammer) Init() {
+	c.counter = new(scenario.Counter)
+	// c.counterArray = make([][]int64, 0)
+	// set up HTTP proxy
+	if proxy != "none" {
+		proxyUrl, err := url.Parse(proxy)
+		if err != nil {
+			log.Fatal(err)
 		}
-	}()
-}
-
-// increase the count and record response time.
-func (c *Counter) record(_time int64) {
-	atomic.AddInt64(&c.count, 1)
-	atomic.AddInt64(&c.totaltime, _time)
-
-	// if longer that 200ms, it is a slow response
-	if _time > 200000000 {
-	//if _time > 500000000 {
-		atomic.AddInt64(&c.totalslowresp, 1)
-		log.Println("Slow response -> ", float64(_time)/1.0e9)
+		c.client = &http.Client{
+			Transport: &http.Transport{
+				// DisableKeepAlives:   false,
+				// MaxIdleConnsPerHost: 200000,
+				Proxy: http.ProxyURL(proxyUrl),
+			},
+		}
+	} else {
+		c.client = &http.Client{
+			Transport: &http.Transport{
+			// DisableKeepAlives:   false,
+			// MaxIdleConnsPerHost: 200000,
+			},
+		}
 	}
-}
-
-// when error happened, increase counter. maybe add error type later TODO
-func (c *Counter) recordError() {
-	atomic.AddInt64(&c.totalerrors, 1)
-
-	// we do not record time for errors.
-	// and there will not be count incr for calls as well
-}
-
-func (c *Counter) recordSend() {
-	atomic.AddInt64(&c.s_count, 1)
 }
 
 // main goroutine to drive traffic
-func (c *Counter) hammer() {
-	var req *http.Request
-	var err error
-
-	_params := url.Values{}
-
-	t1 := time.Now().UnixNano()
-
+func (c *Hammer) hammer(rg *rand.Rand) {
 	// before send out, update send count
-	c.recordSend()
+	c.counter.RecordSend()
+	call, err := profile.NextCall(rg)
 
-	_method, _url, _body, _type, _call := TrafficProfile.NextCall()
+	if err != nil {
+		log.Println("next call error: ", err)
+		return
+	}
 
-	req, err = http.NewRequest(_method, _url, strings.NewReader(_body))
-
-	// generate Oauth signatures with body_hash
-	switch _AUTH_METHOD {
+	req, err := http.NewRequest(call.Method, call.URL, strings.NewReader(call.Body))
+	// log.Println(call, req, err)
+	switch auth_method {
 	case "oauth":
-		_signature := oauth_client.AuthorizationHeaderWithBodyHash(nil, _method, _url, _params, _body)
+		_signature := oauth_client.AuthorizationHeaderWithBodyHash(nil, call.Method, call.URL, url.Values{}, call.Body)
 		req.Header.Add("Authorization", _signature)
 	case "grees2s":
-		// gree authen here.
+		// gree authen here
 		// SignS2SRequest(method string, url string, body string) (string, string, error)
-		_signature, _timestamp, _ := gree_client.SignS2SRequest(_method, _url, _body)
+		_signature, _timestamp, _ := gree_client.SignS2SRequest(call.Method, call.URL, call.Body)
 
-		// realm="crime-city", signature="fe88b76af9ea1e1c55ae85e98bbec6285ac0af22", timestamp="1355188963"'
-
-		//req.Header.Add("Authorization", "S2S"+" realm=\"jackpot-slots\""+
 		req.Header.Add("Authorization", "S2S"+" realm=\"modern-war\""+
 			", signature=\""+_signature+"\", timestamp=\""+_timestamp+"\"")
 	case "greec2s":
-		// gree authen here.
+		// gree authen here
 		// SignS2SRequest(method string, url string, body string) (string, string, error)
-		_signature, _timestamp, _ := gree_client.SignC2SRequest(_method, _url, _body)
-
-		// realm="crime-city", signature="fe88b76af9ea1e1c55ae85e98bbec6285ac0af22", timestamp="1355188963"'
+		_signature, _timestamp, _ := gree_client.SignC2SRequest(call.Method, call.URL, call.Body)
 
 		req.Header.Add("Authorization", "C2S"+" realm=\"jackpot-slots\""+
 			", signature=\""+_signature+"\", timestamp=\""+_timestamp+"\"")
-
 	}
 
-	if _DEBUG {
-		log.Println(req.Header.Get("Authorization"))
-	}
-
-	if _method == "PATCH" || _method == "PUT" || _method == "POST" {
-		if _type == "REST" {
-			// for REST call, we use this one
-
-			// add special haeader for PATCH, PUT and POST
-			// _params.Set("Accept", "application/json")
+	// Add special haeader for PATCH, PUT and POST
+	switch call.Method {
+	case "PATCH", "PUT", "POST":
+		switch call.Type {
+		case "REST":
 			req.Header.Set("Content-Type", "application/json; charset=utf-8")
-		} else if _type == "WWW" {
-			// if thsi is WWW, we use differe content-type
+			break
+		case "WWW":
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			break
 		}
 	}
 
+	t1 := time.Now().UnixNano()
 	res, err := c.client.Do(req)
 
 	response_time := time.Now().UnixNano() - t1
-
-	if err != nil {
-		log.Println("Response Time: ", float64(response_time)/1.0e9, " Erorr: when", _method, _url, "with error ", err)
-		c.recordError()
-		return
-	}
 
 	/*
 		    ###
@@ -194,218 +121,201 @@ func (c *Counter) hammer() {
 			##
 	*/
 	defer req.Body.Close()
-	defer res.Body.Close()
 
-	if _DEBUG {
-		data, err := ioutil.ReadAll(res.Body)
-		// _b, _ := ioutil.ReadAll(req.Body)
-		if err == nil {
-			log.Println("Req : ", _method, _url)
-			if _AUTH_METHOD != "none" {
-				log.Println("Authorization: ", string(req.Header.Get("Authorization")))
-			}
-			log.Println("Req Body : ", _body)
-			log.Println("Response: ", res.Status)
-			log.Println("Res Body : ", string(data))
+	switch {
+	case err != nil:
+		log.Println("Response Time: ", float64(response_time)/1.0e9, " Erorr: when", call.Method, call.URL, "with error ", err)
+		c.counter.RecordError()
+	case res.StatusCode >= 400 && res.StatusCode != 409:
+		log.Println("Got error code --> ", res.Status, "for call ", call.Method, " ", call.URL)
+		c.counter.RecordError()
+	default:
+		// only do successful response here
+		defer res.Body.Close()
+		c.counter.RecordRes(response_time, slowThreshold, call.URL)
+		data, _ := ioutil.ReadAll(res.Body)
+		if call.CallBack == nil && !debug {
 		} else {
-			c.recordError()
-			return
+			if res.StatusCode == 409 {
+				log.Println("Http 409 Res Body : ", string(data))
+			}
+			if debug {
+				log.Println("Req : ", call.Method, call.URL)
+				if auth_method != "none" {
+					log.Println("Authorization: ", string(req.Header.Get("Authorization")))
+				}
+				log.Println("Req Body : ", call.Body)
+				log.Println("Response: ", res.Status)
+				log.Println("Res Body : ", string(data))
+			}
+			if call.CallBack != nil {
+				call.CallBack(call.SePoint, scenario.NEXT, data)
+			}
 		}
 	}
 
-	// check response code here
-	// 409 conflict is ok for PATCH request
-
-	if res.StatusCode >= 400 && res.StatusCode != 409 {
-		//fmt.Println(res.Status, string(data))
-		log.Println("Got error code --> ", res.Status, "for call ", _method, " ", _url)
-		c.recordError()
-		return
-	}
-
-	// reference --> https://github.com/tenntenn/gae-go-testing/blob/master/recorder_test.go
-
-	// only record time for "good" call
-	c.record(response_time)
-	_call.Record(response_time)
 }
 
-// to print out performance counter
-// run every second, will also update last count
-func (c *Counter) pperf() {
-	sps := c.s_count - c.s_lastcount
-	pps := c.count - c.lastcount
-	c.backlog = c.s_count - c.count - c.totalerrors
-
-	atomic.StoreInt64(&c.lastcount, c.count)
-	atomic.StoreInt64(&c.s_lastcount, c.s_count)
-
-	c.avg_time = float64(c.totaltime) / (float64(c.count) * 1.0e9)
-	// c.last_avg_time = TODO!!
-
-	log.Println(" SendPS: ", fmt.Sprintf("%4d", sps),
-		" ReceivePS: ", fmt.Sprintf("%4d", pps), fmt.Sprintf("%2.4f", c.avg_time),
-		" Pending Requests: ", c.backlog,
-		" Error:", c.totalerrors,
-		"|", fmt.Sprintf("%2.2f%s", (float64(c.totalerrors)*100.0/float64(c.totalerrors+c.count)), "%"),
-		" Slow Ratio: ", fmt.Sprintf("%2.2f%s", (float64(c.totalslowresp)*100.0/float64(c.totalerrors+c.count)), "%"))
+func (c *Hammer) monitorHammer() {
+	log.Println(c.counter.GeneralStat(), profile.CustomizedReport())
 }
 
-// routine to return status
-func (c *Counter) stats(res http.ResponseWriter, req *http.Request) {
-	res.Header().Set(
-		"Content-Type", "text/plain",
-	)
-	io.WriteString(
-		res,
-		fmt.Sprintf("Total Request: %d\nTotal Error: %d\n==========\n%s",
-			c.count, c.totalerrors, string(TrafficProfile.Print())),
-	)
-}
+func (c *Hammer) launch(rps int64) {
+	// var _rps time.Duration
 
-func index(res http.ResponseWriter, req *http.Request) {
-	res.Header().Set(
-		"Content-Type",
-		"text/html",
-	)
-	io.WriteString(
-		res,
-		`test`,
-	)
-}
-
-func (c *Counter) run_once(pps time.Duration) {
-	_interval := 1000000000.0 / pps
-	/*
-			_send_per_tick := 1
-		  	if pps > 400 {
-				_send_per_tick = 5
-				_interval = 1000000000.0 * 5 / pps
-				log.Println("dount the per tick sending...")
-		  	}
-	*/
+	_p := time.Duration(rps)
+	_interval := 1.0e9 / _p
 	c.throttle = time.Tick(_interval * time.Nanosecond)
+	// var wg sync.WaitGroup
 
-	// fmt.println _users
+	log.Println("run with rps -> ", int(_p))
+	go func() {
+		i := 0
+		for {
+			if i == len(rands) {
+				i = 0
+			}
+			<-c.throttle
 
+			go c.hammer(rands[i])
+			i++
+		}
+	}()
+
+	c.monitor = time.NewTicker(time.Second)
 	go func() {
 		for {
-			<-c.throttle // rate limit our Service.Method RPCs
-			go c.hammer()
-			/*
-			   if _send_per_tick > 1 {
-			     // send two per tick for very high RPS to be more accurate
-			     go c.hammer()
-			     go c.hammer()
-			     go c.hammer()
-			     go c.hammer()
-			   }
-			*/
+			<-c.monitor.C // rate limit for monitor routine
+			go c.monitorHammer()
+		}
+	}()
+
+	// do log here, so either db, file or no save only display during load test
+	log_intv := time.Tick(time.Duration(logIntv) * time.Second)
+	go func() {
+		for {
+			<-log_intv
+			logger.Log(c.counter.GetAllStat(), logIntv)
 		}
 	}()
 }
+func (c *Hammer) health(rw http.ResponseWriter, req *http.Request) {
+	rw.Header().Set("Content-Type", "application/json")
+	rw.Header().Set("Content-Length", strconv.Itoa(len("health")))
+	rw.WriteHeader(200)
+	rw.Write([]byte("health"))
+}
 
-func (c *Counter) findPPS(_p int64) {
-	var _rps time.Duration
-
-	_rps = time.Duration(_p)
-	log.Println(_rps)
-	// already a gorouting, we just do a infinity loop to find the best RPS
-	for {
-		c.run_once(_rps)
-		log.Println("Run RPS -> ", int(_rps))
-		_result := <-c.runinfo
-		log.Println(_result)
-
-		// now we know pass of failed, we can start adjust _rps
-		if _result {
-			// first, we want make sure we can exit the run, that is
-			// if the good and failed RPS is within 5 RPS (will change
-			// to 5% later), we can assume we found what we are looking for
-			c.lastGoodRPS = _rps
-			if (c.lastGoodRPS*c.lastBadRPS > 0) && (c.lastGoodRPS-c.lastBadRPS < 5) {
-				log.Println("found it!", _rps)
-				// additional report and then quit the process
-			}
-		} else {
-			c.lastBadRPS = _rps
-		}
-		// not found, keep running, next RPS will be (good + bad ) / 2
-		if c.lastBadRPS == 0 {
-			_rps = c.lastGoodRPS * 2
-		} else if c.lastGoodRPS == 0 {
-			_rps = c.lastGoodRPS / 2
-		} else {
-			_rps = (c.lastGoodRPS + c.lastBadRPS) / 2
-		}
+func (c *Hammer) log(rw http.ResponseWriter, req *http.Request) {
+	p := struct {
+		Title string
+		Data  string
+	}{
+		Title: fmt.Sprintf(
+			"Performance Log [type:%s rps:%d size:%d slow:%d]",
+			profileType,
+			rps,
+			sessionAmount,
+			slowThreshold),
+		Data: logger.Read(),
 	}
+	t, _ := template.ParseFiles("log.tpl")
+	t.Execute(rw, p)
 }
 
 // init the program from command line
-var initRPS int64
-var profileFile string
-var initKey string
-var initSecret string
+var (
+	rps              int64
+	profileFile      string
+	profileType      string
+	slowThreshold    int64
+	debug            bool
+	auth_method      string
+	auth_key         string
+	sessionAmount    int
+	sessionUrlPrefix string
+	proxy            string
+
+	logIntv int
+	logType string
+
+	// profile
+	profile scenario.Profile
+	logger  logg.Logger
+
+	// rands
+	rands []*rand.Rand
+
+	gree_client  = new(greeauth.Client)
+	oauth_client = new(oauth.Client)
+)
 
 func init() {
-	//var env string
+	flag.Int64Var(&rps, "rps", 500, "Set Request Per Second")
+	flag.StringVar(&profileFile, "profile", "", "The path to the traffic profile")
+	flag.Int64Var(&slowThreshold, "threshold", 200, "Set slowness standard (in millisecond)")
+	flag.StringVar(&profileType, "type", "default", "Profile type (default|session|your session type)")
+	flag.BoolVar(&debug, "debug", false, "debug flag (true|false)")
+	flag.StringVar(&auth_method, "auth", "none", "Set authorization flag (oauth|gree(c|s)2s|none)")
+	flag.StringVar(&auth_key, "key", "", "Set authorization key")
+	flag.IntVar(&sessionAmount, "size", 100, "session amount")
+	flag.StringVar(&sessionUrlPrefix, "url", "", "Session url prefix")
+	flag.StringVar(&proxy, "proxy", "none", "Set HTTP proxy (need to specify scheme. e.g. http://127.0.0.1:8888)")
+	flag.IntVar(&logIntv, "intv", 6, "Log interval in chart")
+	flag.StringVar(&logType, "ltype", "default", "Log type (file|db)")
 
-	flag.Int64Var(&initRPS, "rps", 500, "you can provide RPS here")
-	flag.StringVar(&profileFile, "profile", "", "traffic profile")
-	flag.BoolVar(&_DEBUG, "debug", false, "Set debug flag")
-	flag.StringVar(&_AUTH_METHOD, "auth", "gree", "Set authorization flag (oauth|gree|none)")
-
-	flag.StringVar(&initKey, "oauthkey", "8e83a8372268", "set oauth key")
-	flag.StringVar(&initSecret, "oauthsecret", "24d643594f7cf03a52f5f6fe7c1b60dd", "set oauth secret")
-	//flag.StringVar(&env, "env", "staging", "set testing environment")
-
-	oauth_client.Credentials.Token = initKey
-	oauth_client.Credentials.Secret = initSecret
-
-	gree_client.C2S_Secret = C2S_SECRET_KEY
-	gree_client.S2S_Secret = S2S_SECRET_KEY
-
-	_AUTH_METHOD = strings.ToLower(_AUTH_METHOD)
 }
 
 // main func
 func main() {
-	// rate_per_sec := 10
-	// throttle := time.Tick( 15 * time.Millisecond)
-	// const NCPU = 16
-	NCPU := runtime.NumCPU()
-	log.Println("# of CPU is ", NCPU)
-
-	runtime.GOMAXPROCS(NCPU + 3)
 
 	flag.Parse()
-	log.Println("RPS is", initRPS)
+	NCPU := runtime.NumCPU()
+	runtime.GOMAXPROCS(NCPU)
 
-	if profileFile != "" {
-		log.Println("Profile is", profileFile)
-		TrafficProfile.InitProfileFromFile(profileFile)
-	} else {
-		TrafficProfile.Init()
+	// to speed up
+	rands = make([]*rand.Rand, NCPU)
+	for i, _ := range rands {
+		s := rand.NewSource(time.Now().UnixNano())
+		rands[i] = rand.New(s)
 	}
+
+	gree_client.C2S_Secret = auth_key
+	gree_client.S2S_Secret = auth_key
+
+	log.Println("cpu number -> ", NCPU)
+	log.Println("rps -> ", rps)
+	log.Println("slow threshold -> ", slowThreshold, "ms")
+	log.Println("profile type -> ", profileType)
+	log.Println("proxy -> ", proxy)
+	log.Println("auth method-> ", auth_method)
+	log.Println("auth key -> ", auth_key)
+
+	profile, _ = scenario.New(profileType, sessionAmount)
+	if profileFile != "" {
+		profile.InitFromFile(profileFile)
+	} else {
+		profile.InitFromCode(sessionUrlPrefix)
+	}
+
+	logger, _ = logg.NewLogger(logType, fmt.Sprintf("%s_%d_%d_%d", profileType, rps, sessionAmount, slowThreshold))
 
 	rand.Seed(time.Now().UnixNano())
 
-	counter := new(Counter)
-	counter._init()
+	hamm := new(Hammer)
+	hamm.Init()
 
-	go func() {
-		counter.findPPS(initRPS)
-	}()
+	go hamm.launch(rps)
 
-	// start web interface here, which returns only stats in text format
-	http.HandleFunc("/", index)
-	http.HandleFunc("/test", func(res http.ResponseWriter, req *http.Request) {
-		log.Println("receive request")
-		counter.stats(res, req)
-	})
-	http.ListenAndServe(":9001", nil)
+	http.HandleFunc("/log", hamm.log)
+	http.HandleFunc("/health", hamm.health)
+	http.ListenAndServe(":9090", nil)
 
-	// this will block the program, we may add a targe # of msg here.
 	var input string
-	fmt.Scanln(&input)
+	for {
+		fmt.Scanln(&input)
+		if input == "exit" {
+			break
+		}
+	}
 }

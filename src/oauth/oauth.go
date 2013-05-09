@@ -298,7 +298,7 @@ func (c *Client) SignParamWithBodyHash(credentials *Credentials, method, urlStr 
 // http://tools.ietf.org/html/rfc5849#section-3.5.1 for information about
 // transmitting OAuth parameters in an HTTP request header.
 func (c *Client) AuthorizationHeaderWithBodyHash(credentials *Credentials, method, urlStr string, params url.Values, body string) string {
-	// Don't scribble on caller's params. 
+	// Don't scribble on caller's params.
 	p := make(url.Values)
 	for k, v := range params {
 		p[k] = v
@@ -326,7 +326,7 @@ func (c *Client) AuthorizationHeaderWithBodyHash(credentials *Credentials, metho
 // http://tools.ietf.org/html/rfc5849#section-3.5.1 for information about
 // transmitting OAuth parameters in an HTTP request header.
 func (c *Client) AuthorizationHeader(credentials *Credentials, method, urlStr string, params url.Values) string {
-	// Don't scribble on caller's params. 
+	// Don't scribble on caller's params.
 	p := make(url.Values)
 	for k, v := range params {
 		p[k] = v

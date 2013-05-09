@@ -1,54 +1,34 @@
-hammer.go
-=========
+## hammer.go
 Stress test framework in Go   
 
-Files:
-======
+## Files:
+hammer.go - the client hammer tool
 
-hammer.go - the client hammer tool   
-server.go - a lightweight server just for testing purpose   
-
-To run the performance test:
-============================
-```shell
-GOPATH=~/hammer/:$GOPATH go run hammer.go -rps 1   
+## Usage:
+1. none session scenario
+```
+go run hammer.go -rps 100 -profile profile/event_queue_profile.json  
 ```
 
-To run test with Oauth:
-=======================
-```shell
-GOPATH=~/hammer/:$GOPATH go run hammer.go -rps 1 -auth="oauth"   
+2. session scenario
+```
+go run hammer.go -rps 100 -type ws_session -size 100
 ```
 
-To run test with Greeauth:
-==========================
-```shell
-GOPATH=~/hammer/:$GOPATH go run hammer.go -rps 1 -auth="grees2s"   
+> try `go run hammer.go -h` to get all cmd parameters
 
-GOPATH=~/hammer/:$GOPATH go run hammer.go -rps 1 -auth="greec2s"   
-```
 
-To enable debug:
-================
-```shell
-GOPATH=~/hammer/:$GOPATH go run hammer.go -rps 1 -auth="greec2s" -debug   
-```
+## To get binary for Hammer:
+**You have to properly compile/update Go for Linux first**
 
-To build Hammer for Linux:
-==========================
-You have to properly compile/update Go for Linux first,
+1. `brew install go --HEAD --cross-compile-common` will resolve all
+2. `GOOS=linux GOARCH=amd64 CGO_ENABLE=0 go build -o hammer.linux hammer.go`
 
-To build binary for Linux
-```shell
-GOOS=linux GOARCH=amd64 GOPATH=~/hammer/:$GOPATH CGO_ENABLED=0 go build -o hammer.prod.linux hammer.go
-```
 
-To update traffic profile:
-==========================
-
-You will have to update the trafficprofiles pkg source (this will be updated with more details, and subject to change)
-
-The file is:
-```shell
-src/trafficprofiles/trafficprofile.go
-```
+## Make it yourself:
+* none session scenario
+ 1. add or modify existed .json files in /profile, following current format
+ 
+* session scenario
+ 1. create your .go file in /scenario
+ 2. follow any *_scenario.go file as example
